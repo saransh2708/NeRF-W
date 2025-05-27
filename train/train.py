@@ -1,71 +1,72 @@
 import torch
-import os
-from torch.utils.data import DataLoader
-from nerf.dataloader import MiniDataset
+from nerf.dataloader_llff import LLFFDataset
 from nerf.model import NeRFW
-from nerf.sampler import sample_points_batch  # new vectorized sampler
-from nerf.render import volume_render_batch   # new vectorized renderer
+from nerf.rays import get_random_rays
+from nerf.sampler import sample_points_batch
+from nerf.render import volume_render_batch
 
-# --- Training config
+# --- Detect device (MPS for Apple Silicon, fallback to CPU)
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# --- Config
+scene = "fern"
 num_epochs = 100
-batch_size = 4
-num_samples = 24
-near, far = 1.0, 4.0
-lr = 1e-3
+num_rays = 512
+lr = 5e-4
+near, far = 2.0, 6.0
+num_samples = 64
 
-# --- Load dataset
-dataset = MiniDataset(num_images=3)
-loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+# --- Dataset
+dataset = LLFFDataset(f"data/{scene}", downscale=4, apply_transients=True)
 
-# --- Model + optimizer
-model = NeRFW(num_images=3)
+# --- Model + Optimizer
+model = NeRFW(num_images=len(dataset)).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
 # --- Training loop
 for epoch in range(num_epochs):
     total_loss = 0.0
 
-    for batch in loader:
-        ray_o = batch["ray_o"]        # (B, 3)
-        ray_d = batch["ray_d"]        # (B, 3)
-        target_rgb = batch["rgb"]     # (B, 3)
-        image_idx = batch["image_index"]  # (B,)
+    for img_idx in range(len(dataset)):
+        sample = dataset[img_idx]
+        rays_o, rays_d, target_rgb = get_random_rays(
+            sample["image"], sample["c2w"], sample["intrinsics"], num_rays
+        )
 
-        B = ray_o.shape[0]
+        # Move data to device
+        rays_o = rays_o.to(device)
+        rays_d = rays_d.to(device)
+        target_rgb = target_rgb.to(device)
 
-        # --- Vectorized point sampling
-        pts, t_vals = sample_points_batch(ray_o, ray_d, num_samples, near, far)  # (B, N, 3), (B, N)
+        # Sample points
+        pts, t_vals = sample_points_batch(rays_o, rays_d, num_samples, near, far)
+        dirs = rays_d[:, None, :].expand_as(pts)
 
-        dirs = ray_d[:, None, :].expand_as(pts)  # (B, N, 3)
-
-        # --- Flatten for model
-        pts_flat = pts.reshape(-1, 3)           # (B*N, 3)
-        dirs_flat = dirs.reshape(-1, 3)         # (B*N, 3)
-        idx_flat = image_idx.unsqueeze(1).expand(B, num_samples).reshape(-1)  # (B*N,)
+        # Flatten for model
+        B, N = pts.shape[:2]
+        pts_flat = pts.reshape(-1, 3).to(device)
+        dirs_flat = dirs.reshape(-1, 3).to(device)
+        idx_flat = torch.full((B * N,), img_idx, dtype=torch.long).to(device)
 
         # --- Model forward
-        static_rgb, static_sigma, trans_rgb, trans_sigma = model(pts_flat, dirs_flat, idx_flat)
+        static_rgb, static_sigma, trans_rgb, trans_sigma, trans_conf = model(
+            pts_flat, dirs_flat, idx_flat
+        )
 
-        # --- Combine outputs
-        rgb = (static_rgb + trans_rgb) / 2.0
-        sigma = static_sigma + trans_sigma
-        sigma = sigma.clamp(min=0.0, max=10.0)
+        # --- Blend RGB using confidence
+        # conf ∈ (0, 1), shape: (B*N, 1)
+        rgb_blend = static_rgb * (1 - trans_conf) + trans_rgb * trans_conf
+        rgb_blend = rgb_blend.view(B, N, 3)
+        sigma = (static_sigma + trans_sigma).view(B, N, 1)
 
-        # --- Reshape for rendering
-        rgb = rgb.view(B, num_samples, 3)
-        sigma = sigma.view(B, num_samples, 1)
-
-        # --- Volume render
-        predicted_rgb = volume_render_batch(rgb, sigma, t_vals)  # (B, 3)
+        # --- Volume rendering
+        rendered_rgb = volume_render_batch(rgb_blend, sigma, t_vals.to(device))
 
         # --- Loss
-        loss = torch.mean((predicted_rgb - target_rgb) ** 2)
-        reg = trans_sigma.mean()
-        loss = loss + 0.01 * reg
-
-        if torch.isnan(loss):
-            print("NaN in loss!")
-            continue
+        recon_loss = torch.mean((rendered_rgb - target_rgb) ** 2)
+        reg_loss = trans_sigma.mean()  # optional: add KL on conf later
+        loss = recon_loss + 0.01 * reg_loss
 
         # --- Backprop
         optimizer.zero_grad()
@@ -73,6 +74,7 @@ for epoch in range(num_epochs):
         optimizer.step()
 
         total_loss += loss.item()
-    os.makedirs("checkpoints", exist_ok=True)
-    torch.save(model.state_dict(), "checkpoints/nerfw.pth") 
-    print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss:.6f}")
+
+    print(f"Epoch {epoch+1}/{num_epochs} - Loss: {total_loss:.4f}")
+
+torch.save(model.state_dict(), "checkpoints/nerfw.pth")

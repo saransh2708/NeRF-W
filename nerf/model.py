@@ -58,6 +58,7 @@ class NeRFStatic(nn.Module):
 
         return rgb, sigma
 
+
 class NeRFW(nn.Module):
     def __init__(self, 
                  num_images, 
@@ -70,7 +71,6 @@ class NeRFW(nn.Module):
                  skips=[4]):
         super().__init__()
 
-        # --- Static part
         self.static = NeRFStatic(
             pos_dim=pos_dim,
             dir_dim=dir_dim,
@@ -80,43 +80,38 @@ class NeRFW(nn.Module):
             skips=skips
         )
 
-        # --- Image-specific embeddings
-        self.embedding_a = nn.Embedding(num_images, latent_dim)  # for RGB
-        self.embedding_b = nn.Embedding(num_images, latent_dim)  # for density
+        # Image-specific embeddings
+        self.embedding_a = nn.Embedding(num_images, latent_dim)
+        self.embedding_b = nn.Embedding(num_images, latent_dim)
 
-        # --- Transient head
         self.transient_head = nn.Sequential(
             nn.Linear(latent_dim + pos_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 4)  # RGB (3) + density (1)
+            nn.Linear(hidden_dim, 5)  # RGB (3) + density (1) + confidence(1)
         )
 
     def forward(self, x, d, image_index):
-        """
-        Args:
-            x: (..., 3) 3D positions
-            d: (..., 3) view directions
-            image_index: (int or tensor) index of the current image
-        Returns:
-            static_rgb, static_sigma
-            transient_rgb, transient_sigma
-        """
         static_rgb, static_sigma = self.static(x, d)
 
-        # Embed the image index (same for all points)
-        embed_a = self.embedding_a(image_index)  # (latent_dim,)
-        embed_b = self.embedding_b(image_index)  # (latent_dim,)
+        # Handle image embeddings safely (works for int or tensor index)
+        embed_a = self.embedding_a(image_index)
+        embed_b = self.embedding_b(image_index)
 
-        # Expand embeddings to match number of points
-        if x.dim() == 2:
-            embed_a = embed_a.expand(x.shape[0], -1)
-            embed_b = embed_b.expand(x.shape[0], -1)
+        if embed_a.dim() == 1:
+            embed_a = embed_a.unsqueeze(0).repeat(x.shape[0], 1)
+            embed_b = embed_b.unsqueeze(0).repeat(x.shape[0], 1)
+        elif embed_a.shape[0] != x.shape[0]:
+            # Happens if image_index is broadcasted wrong
+            embed_a = embed_a.repeat_interleave(x.shape[0] // embed_a.shape[0], dim=0)
+            embed_b = embed_b.repeat_interleave(x.shape[0] // embed_b.shape[0], dim=0)
 
         transient_input = torch.cat([x, embed_b], dim=-1)
         out = self.transient_head(transient_input)
-        transient_rgb = torch.sigmoid(out[:, :3])  # RGB
-        transient_sigma = torch.relu(out[:, 3:])   # density
+        transient_rgb = torch.sigmoid(out[:, :3])      # RGB
+        transient_sigma = torch.relu(out[:, 3:4])      # Density
+        transient_conf = torch.sigmoid(out[:, 4:5])    # Confidence (0–1)
 
-        return static_rgb, static_sigma, transient_rgb, transient_sigma
+        return static_rgb, static_sigma, transient_rgb, transient_sigma, transient_conf
+

@@ -18,8 +18,8 @@ def sample_points_batch(ray_origins, ray_directions, num_samples, near, far, per
     B = ray_origins.shape[0]
     device = ray_origins.device
 
-    t_vals = torch.linspace(near, far, steps=num_samples, device=device)
-    t_vals = t_vals.expand(B, num_samples)
+    t_vals = torch.linspace(near, far, num_samples, device=device)
+    t_vals = t_vals.expand(B, num_samples)  # (B, N)
 
     if perturb:
         mids = 0.5 * (t_vals[:, :-1] + t_vals[:, 1:])
