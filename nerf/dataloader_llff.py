@@ -7,34 +7,37 @@ import random
 import torchvision.transforms.functional as TF
 from PIL import Image
 
-def apply_transient_effect(pil_img, image_index):
-    """Apply fake transient artifacts to simulate moving objects, lighting, etc."""
-    img = TF.to_tensor(pil_img)
+import torchvision.transforms.functional as TF
+from PIL import ImageDraw
 
-    if isinstance(image_index, torch.Tensor):
-        image_index = image_index.item()
+def apply_transient_effect(img, image_index):
+    """
+    Add fake clutter to simulate transient objects. Used for training NeRF-W.
+    """
+    img = img.copy()
+    draw = ImageDraw.Draw(img)
 
+    # Option 1: Add random colored rectangles (simulate cars, signs, clutter)
     if image_index % 3 == 0:
-        # Add a random colored rectangle
-        # Add a random colored rectangle (safely)
-        H, W = img.shape[1], img.shape[2]
-        w = random.randint(10, min(30, W - 1))
-        h = random.randint(10, min(30, H - 1))
-        x = random.randint(0, W - w)
-        y = random.randint(0, H - h)
+        for _ in range(3):
+            x0 = random.randint(0, img.width - 30)
+            y0 = random.randint(0, img.height - 30)
+            x1 = x0 + random.randint(10, 50)
+            y1 = y0 + random.randint(10, 50)
+            color = tuple([random.randint(0, 255) for _ in range(3)])
+            draw.rectangle([x0, y0, x1, y1], fill=color)
 
-        img[:, y:y+h, x:x+w] = torch.rand(3, h, w)
-
+    # Option 2: Brightness tint (simulate lighting variation)
     elif image_index % 3 == 1:
-        # Light red tint
-        tint = torch.tensor([1.0, 0.8, 0.8]).view(3, 1, 1)
-        img = img * tint
+        img = TF.adjust_brightness(img, random.uniform(0.6, 1.4))
 
+    # Option 3: Add haze (simulate fog/smoke)
     else:
-        # Brightness variation
-        img = img * random.uniform(0.7, 1.3)
+        overlay = Image.new("RGB", img.size, (200, 200, 200))
+        img = Image.blend(img, overlay, alpha=0.3)
 
-    return img.clamp(0, 1)
+    return TF.to_tensor(img)
+
 
 def load_poses_bounds(path):
     poses_bounds = np.load(os.path.join(path, "poses_bounds.npy"))

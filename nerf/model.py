@@ -2,13 +2,14 @@ import torch
 import torch.nn as nn
 from nerf.utils import PositionalEncoding
 
+
 class NeRFStatic(nn.Module):
-    def __init__(self, 
-                 pos_dim=3, 
-                 dir_dim=3, 
-                 num_pos_freqs=10, 
-                 num_dir_freqs=4, 
-                 hidden_dim=256, 
+    def __init__(self,
+                 pos_dim=3,
+                 dir_dim=3,
+                 num_pos_freqs=10,
+                 num_dir_freqs=4,
+                 hidden_dim=256,
                  skips=[4]):
         super().__init__()
 
@@ -60,14 +61,14 @@ class NeRFStatic(nn.Module):
 
 
 class NeRFW(nn.Module):
-    def __init__(self, 
-                 num_images, 
-                 pos_dim=3, 
-                 dir_dim=3, 
-                 num_pos_freqs=10, 
-                 num_dir_freqs=4, 
-                 hidden_dim=256, 
-                 latent_dim=16, 
+    def __init__(self,
+                 num_images,
+                 pos_dim=3,
+                 dir_dim=3,
+                 num_pos_freqs=10,
+                 num_dir_freqs=4,
+                 hidden_dim=256,
+                 latent_dim=16,
                  skips=[4]):
         super().__init__()
 
@@ -80,7 +81,6 @@ class NeRFW(nn.Module):
             skips=skips
         )
 
-        # Image-specific embeddings
         self.embedding_a = nn.Embedding(num_images, latent_dim)
         self.embedding_b = nn.Embedding(num_images, latent_dim)
 
@@ -89,13 +89,12 @@ class NeRFW(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 5)  # RGB (3) + density (1) + confidence(1)
+            nn.Linear(hidden_dim, 5)  # RGB (3), sigma (1), confidence (1)
         )
 
     def forward(self, x, d, image_index):
         static_rgb, static_sigma = self.static(x, d)
 
-        # Handle image embeddings safely (works for int or tensor index)
         embed_a = self.embedding_a(image_index)
         embed_b = self.embedding_b(image_index)
 
@@ -103,15 +102,14 @@ class NeRFW(nn.Module):
             embed_a = embed_a.unsqueeze(0).repeat(x.shape[0], 1)
             embed_b = embed_b.unsqueeze(0).repeat(x.shape[0], 1)
         elif embed_a.shape[0] != x.shape[0]:
-            # Happens if image_index is broadcasted wrong
             embed_a = embed_a.repeat_interleave(x.shape[0] // embed_a.shape[0], dim=0)
             embed_b = embed_b.repeat_interleave(x.shape[0] // embed_b.shape[0], dim=0)
 
         transient_input = torch.cat([x, embed_b], dim=-1)
         out = self.transient_head(transient_input)
-        transient_rgb = torch.sigmoid(out[:, :3])      # RGB
-        transient_sigma = torch.relu(out[:, 3:4])      # Density
-        transient_conf = torch.sigmoid(out[:, 4:5])    # Confidence (0–1)
 
-        return static_rgb, static_sigma, transient_rgb, transient_sigma, transient_conf
+        transient_rgb = torch.sigmoid(out[:, :3])
+        transient_sigma = torch.relu(out[:, 3:4])
+        confidence = torch.sigmoid(out[:, 4:5])  # blend weight
 
+        return static_rgb, static_sigma, transient_rgb, transient_sigma, confidence

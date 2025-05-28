@@ -33,22 +33,18 @@ def render_decomposed(model, H, W, K, c2w, image_index, num_samples=64, near=2.0
 
     static_rgb, static_sigma, trans_rgb, trans_sigma, trans_conf = model(pts_flat, dirs_flat, idx_flat)
 
-    # Reshape
     static_rgb = static_rgb.view(B, num_samples, 3)
     trans_rgb = trans_rgb.view(B, num_samples, 3)
     sigma = (static_sigma + trans_sigma).view(B, num_samples, 1)
     trans_conf = trans_conf.view(B, num_samples, 1)
 
-    # Render separately
-    rgb_static = volume_render_batch(static_rgb, sigma, t_vals.to(device))
-    rgb_transient = volume_render_batch(trans_rgb, sigma, t_vals.to(device))
+    # Confidence-weighted blend
+    rgb_blend = static_rgb * (1 - trans_conf) + trans_rgb * trans_conf
+    rgb_blend = volume_render_batch(rgb_blend, sigma, t_vals)
 
-    # Blended render using transient confidence
-    w = trans_conf
-    rgb_blend = static_rgb * (1 - w) + trans_rgb * w
-    rgb_blend = volume_render_batch(rgb_blend, sigma, t_vals.to(device))
+    rgb_static = volume_render_batch(static_rgb, sigma, t_vals)
+    rgb_transient = volume_render_batch(trans_rgb, sigma, t_vals)
 
-    # Confidence heatmap (avg along depth)
     conf_map = trans_conf.mean(dim=1).view(H, W).cpu().numpy()
 
     return (
@@ -90,7 +86,7 @@ if __name__ == "__main__":
 
     # Load model
     model = NeRFW(num_images=20)
-    model.load_state_dict(torch.load("checkpoints/nerfw.pth", map_location=device), strict=False)
+    model.load_state_dict(torch.load("checkpoints/nerfw_epoch250.pth", map_location=device), strict=False)
 
     # Render decomposed components
     static, transient, blended, conf_map = render_decomposed(model, H, W, K, c2w, image_index=0)
